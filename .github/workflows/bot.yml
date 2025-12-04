@@ -1,4 +1,4 @@
-name: Trusted Futures Bot
+name: Mega Bot
 
 on:
   schedule:
@@ -6,27 +6,30 @@ on:
   workflow_dispatch:
 
 jobs:
-  run-bot:
+  mega:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install --upgrade ccxt pandas ta
+    - name: Install deps
+      run: |
+        pip install --upgrade pip
+        pip install ccxt pandas ta torch numpy joblib
 
-      - name: Run one trusted trading cycle
-        env:
-          BINANCE_KEY: ${{ secrets.BINANCE_KEY }}
-          BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
-        run: |
-          python3 trusted_trading_bot.py --once
+    - name: Run Mega Bot
+      env:
+        BINANCE_KEY: ${{ secrets.BINANCE_KEY }}
+        BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
+      run: python3 mega_bot.py
+
+    - name: Commit trade logs
+      uses: stefanzweifel/git-auto-commit-action@v4
+      with:
+        commit_message: "Update trades.csv"
+        file_pattern: "trades.csv"
