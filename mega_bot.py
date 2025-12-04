@@ -10,53 +10,53 @@ import pandas as pd
 import ta
 from datetime import datetime
 
-# =========================================================
-# LOGGING (simple print so GitHub Actions shows everything)
-# =========================================================
+# =============================
+# Simple logger
+# =============================
 def log(*args):
     print("[MEGA]", *args)
 
-# =========================================================
-# UTIL: Save trades to CSV
-# =========================================================
+# =============================
+# Trade logging -> CSV
+# =============================
 def log_trade(symbol, side, qty, entry, sl, tp):
     file = "trades.csv"
-    new = not os.path.exists(file)
+    new_file = not os.path.exists(file)
     with open(file, "a", newline="") as f:
         w = csv.writer(f)
-        if new:
-            w.writerow(["ts","symbol","side","qty","entry","sl","tp"])
+        if new_file:
+            w.writerow(["ts", "symbol", "side", "qty", "entry", "sl", "tp"])
         w.writerow([datetime.utcnow().isoformat(), symbol, side, qty, entry, sl, tp])
 
-# =========================================================
-# UTIL: Load OHLCV
-# =========================================================
+# =============================
+# OHLCV loader
+# =============================
 def load_ohlcv(symbol, timeframe, limit=500):
     ex = ccxt.binance()
-    o = ex.fetch_ohlcv(symbol, timeframe, limit=limit)
-    df = pd.DataFrame(o, columns=["ts","open","high","low","close","volume"])
+    data = ex.fetch_ohlcv(symbol, timeframe, limit=limit)
+    df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "close", "volume"])
     df["ts"] = pd.to_datetime(df["ts"], unit="ms")
     return df
 
-# =========================================================
-# INDICATORS
-# =========================================================
-def add_indicators(df):
+# =============================
+# Indicator builder (ta)
+# =============================
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    df["ema20"] = ta.trend.EMAIndicator(df["close"], 20).ema_indicator()
-    df["ema50"] = ta.trend.EMAIndicator(df["close"], 50).ema_indicator()
-    df["ema200"] = ta.trend.EMAIndicator(df["close"], 200).ema_indicator()
+    df["ema20"] = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()
+    df["ema50"] = ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()
+    df["ema200"] = ta.trend.EMAIndicator(df["close"], window=200).ema_indicator()
 
-    df["rsi"] = ta.momentum.RSIIndicator(df["close"], 14).rsi()
+    df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
 
     macd = ta.trend.MACD(df["close"])
-    df["macd"]  = macd.macd()
+    df["macd"] = macd.macd()
     df["macds"] = macd.macd_signal()
     df["macdh"] = macd.macd_diff()
 
     df["atr"] = ta.volatility.AverageTrueRange(
-        df["high"], df["low"], df["close"], 14
+        df["high"], df["low"], df["close"], window=14
     ).average_true_range()
 
     df["vol_sma"] = df["volume"].rolling(20).mean()
@@ -64,81 +64,99 @@ def add_indicators(df):
     df.dropna(inplace=True)
     return df
 
-# =========================================================
-# LSTM MODEL
-# =========================================================
+# =============================
+# LSTM model
+# =============================
 SEQ = 20
 
 class LSTM(nn.Module):
-    def __init__(self, n):
+    def __init__(self, n_features: int):
         super().__init__()
-        self.lstm = nn.LSTM(n, 64, batch_first=True)
-        self.fc   = nn.Linear(64, 1)
-        self.sig  = nn.Sigmoid()
+        self.lstm = nn.LSTM(n_features, 64, batch_first=True)
+        self.fc = nn.Linear(64, 1)
+        self.sig = nn.Sigmoid()
 
     def forward(self, x):
-        out,_ = self.lstm(x)
+        out, _ = self.lstm(x)
         out = out[:, -1]
         out = self.fc(out)
         return self.sig(out)
 
-# =========================================================
-# MEGA BOT
-# =========================================================
+# =============================
+# MegaBot
+# =============================
 class MegaBot:
-    def __init__(self, key, sec):
+    def __init__(self, api_key: str, api_secret: str):
         self.ex = ccxt.binance({
-            "apiKey": key,
-            "secret": sec,
+            "apiKey": api_key,
+            "secret": api_secret,
             "enableRateLimit": True,
-            "options": {"defaultType": "future"}
+            "options": {"defaultType": "future"},
         })
 
-        # Demo trading safety
+        # Try to enable demo trading; ignore if unsupported
         try:
-            self.ex.enable_demo_trading(True)
-        except:
-            pass
+            try:
+                self.ex.enable_demo_trading(True)
+            except TypeError:
+                self.ex.enable_demo_trading()
+            log("Demo trading enabled.")
+        except Exception as e:
+            log("Demo trading not explicitly enabled:", e)
 
         self.symbols = ["ETHUSDT", "XRPUSDT", "1000PEPEUSDT"]
-        self.cooldown = 900  # 15 minutes
+
+        # Risk / MM
+        self.cooldown_sec = 15 * 60
         self.daily_limit = 3
         self.last_trade = {s: 0 for s in self.symbols}
         self.trade_count = {s: 0 for s in self.symbols}
-        self.day = time.strftime("%Y-%m-%d")
+        self.current_day = time.strftime("%Y-%m-%d")
 
-        # Load ML model
+        # Load ML models if they exist; otherwise bot falls back to rule-only
+        self.rf = None
+        self.lstm = None
+        self.Q = None
+        self.A = ["hold", "long", "short"]
+
+        # RandomForest
         if os.path.exists("models/rf.pkl"):
-            self.rf = joblib.load("models/rf.pkl")
-        else:
-            self.rf = None
+            try:
+                self.rf = joblib.load("models/rf.pkl")
+                log("RandomForest model loaded.")
+            except Exception as e:
+                log("Failed to load rf.pkl:", e)
 
-        # Load RL policy
+        # RL
         if os.path.exists("models/rl.pkl"):
-            self.Q, self.A = joblib.load("models/rl.pkl")
-        else:
-            self.Q, self.A = None, ["hold","long","short"]
+            try:
+                self.Q, self.A = joblib.load("models/rl.pkl")
+                log("RL policy loaded.")
+            except Exception as e:
+                log("Failed to load rl.pkl:", e)
 
-        # Load LSTM
+        # LSTM
         if os.path.exists("models/lstm.pt"):
-            # create dummy to load into
-            df = add_indicators(load_ohlcv("ETHUSDT","5m",SEQ+5))
-            n = df.drop(["ts"],axis=1).shape[1]
-            self.lstm = LSTM(n)
-            self.lstm.load_state_dict(torch.load("models/lstm.pt"))
-            self.lstm.eval()
-        else:
-            self.lstm = None
+            try:
+                df_tmp = add_indicators(load_ohlcv("ETHUSDT", "5m", SEQ + 5))
+                n_features = df_tmp.drop(["ts"], axis=1).shape[1]
+                self.lstm = LSTM(n_features)
+                self.lstm.load_state_dict(torch.load("models/lstm.pt"))
+                self.lstm.eval()
+                log("LSTM model loaded.")
+            except Exception as e:
+                log("Failed to load lstm.pt:", e)
 
-    # =====================================================
+    # -------------------------
     # Trusted rule-based filter
-    # =====================================================
+    # -------------------------
     def trusted_filter(self, symbol):
         try:
-            df5  = add_indicators(load_ohlcv(symbol,"5m"))
-            df15 = add_indicators(load_ohlcv(symbol,"15m"))
-            df1h = add_indicators(load_ohlcv(symbol,"1h"))
-        except:
+            df5 = add_indicators(load_ohlcv(symbol, "5m"))
+            df15 = add_indicators(load_ohlcv(symbol, "15m"))
+            df1h = add_indicators(load_ohlcv(symbol, "1h"))
+        except Exception as e:
+            log("trusted_filter data error", symbol, e)
             return None, None
 
         f = df5.iloc[-1]
@@ -148,19 +166,22 @@ class MegaBot:
 
         price = f["close"]
 
-        if f["atr"]/price < 0.002: return None, None
-        if f["volume"] < f["vol_sma"]*1.2: return None, None
+        # Filters: volatility & volume
+        if f["atr"] / price < 0.002:
+            return None, None
+        if f["volume"] < f["vol_sma"] * 1.2:
+            return None, None
 
-        uptrend   = s["ema50"] > s["ema200"]
+        uptrend = s["ema50"] > s["ema200"]
         downtrend = s["ema50"] < s["ema200"]
 
         mid_bull = m["ema20"] > m["ema50"]
         mid_bear = m["ema20"] < m["ema50"]
 
-        rsi_up   = fp["rsi"] < 30 <= f["rsi"]
+        rsi_up = fp["rsi"] < 30 <= f["rsi"]
         rsi_down = fp["rsi"] > 70 >= f["rsi"]
 
-        macd_up   = f["macd"] > f["macds"] and f["macdh"] > 0
+        macd_up = f["macd"] > f["macds"] and f["macdh"] > 0
         macd_down = f["macd"] < f["macds"] and f["macdh"] < 0
 
         if uptrend and mid_bull and rsi_up and macd_up:
@@ -171,120 +192,171 @@ class MegaBot:
 
         return None, None
 
-    # =====================================================
-    # ML prediction (RF)
-    # =====================================================
+    # -------------------------
+    # ML predictions
+    # -------------------------
     def ml_predict(self, symbol):
         if self.rf is None:
             return None
+        df = add_indicators(load_ohlcv(symbol, "5m", 100))
+        X = df.drop(["ts"], axis=1).iloc[-1:].values
+        try:
+            return int(self.rf.predict(X)[0])  # 1=long, 0=short
+        except Exception as e:
+            log("RF prediction error", symbol, e)
+            return None
 
-        df = add_indicators(load_ohlcv(symbol,"5m",100))
-        X = df.drop(["ts"],axis=1).iloc[-1:].values
-        return int(self.rf.predict(X)[0])  # 1 long / 0 short
-
-    # =====================================================
-    # LSTM prediction
-    # =====================================================
     def lstm_predict(self, symbol):
         if self.lstm is None:
             return None
-
-        df = add_indicators(load_ohlcv(symbol,"5m",SEQ+5))
-        X = df.drop(["ts"],axis=1).values[-SEQ:]
+        df = add_indicators(load_ohlcv(symbol, "5m", SEQ + 5))
+        X = df.drop(["ts"], axis=1).values[-SEQ:]
         X = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
-        return float(self.lstm(X))  # >0.5 long, <0.5 short
+        try:
+            prob = float(self.lstm(X))
+            return prob  # >0.5 long, <0.5 short
+        except Exception as e:
+            log("LSTM prediction error", symbol, e)
+            return None
 
-    # =====================================================
-    # RL action
-    # =====================================================
     def rl_predict(self, symbol):
         if self.Q is None:
-            return "hold"
-
-        df = add_indicators(load_ohlcv(symbol,"5m",50))
+            return None
+        df = add_indicators(load_ohlcv(symbol, "5m", 50))
         rsi = df["rsi"].iloc[-1]
-        s = np.digitize(rsi,[30,50,70])
-        a = np.argmax(self.Q[s])
-        return self.A[a]
+        s = np.digitize(rsi, [30, 50, 70])
+        try:
+            a = np.argmax(self.Q[s])
+            return self.A[a]  # "hold","long","short"
+        except Exception as e:
+            log("RL prediction error", symbol, e)
+            return None
 
-    # =====================================================
-    # Position size
-    # =====================================================
-    def size(self, atr, price):
-        bal = self.ex.fetch_balance()["total"].get("USDT", 0)
+    # -------------------------
+    # Position sizing
+    # -------------------------
+    def position_size(self, atr, price):
+        try:
+            bal = self.ex.fetch_balance()["total"].get("USDT", 0)
+        except Exception as e:
+            log("fetch_balance error", e)
+            return 0
+
         if bal <= 0:
             return 0
-        risk = bal * 0.01
+
+        risk = bal * 0.01  # 1% risk
         sl_dist = atr * 2
+        if sl_dist <= 0:
+            return 0
+
         qty = risk / sl_dist
         return round(qty, 3)
 
-    # =====================================================
-    # Execute trade
-    # =====================================================
-    def trade(self, symbol):
-        # Reset daily counter
+    # -------------------------
+    # Execute one trade for one symbol
+    # -------------------------
+    def trade_symbol(self, symbol):
+        # Reset day counters
         today = time.strftime("%Y-%m-%d")
-        if today != self.day:
-            self.day = today
+        if today != self.current_day:
+            self.current_day = today
             self.trade_count = {s: 0 for s in self.symbols}
 
         # Cooldown
-        if time.time() - self.last_trade[symbol] < self.cooldown:
-            return None
+        if time.time() - self.last_trade[symbol] < self.cooldown_sec:
+            return
 
         # Daily limit
         if self.trade_count[symbol] >= self.daily_limit:
-            return None
+            return
 
-        # === All Models ===
-        rule, atr = self.trusted_filter(symbol)
-        if not rule:
-            return None
+        # 1) Rule-based filter
+        rule_dir, atr = self.trusted_filter(symbol)
+        if not rule_dir or not atr:
+            return
 
+        # 2) ML / LSTM / RL signals (may be None)
         ml = self.ml_predict(symbol)
-        lstm = self.lstm_predict(symbol)
-        rl = self.rl_predict(symbol)
+        lstm_prob = self.lstm_predict(symbol)
+        rl_action = self.rl_predict(symbol)
 
-        long_signal = (rule=="long" and ml==1 and lstm>0.5 and rl!="short")
-        short_signal= (rule=="short" and ml==0 and lstm<0.5 and rl!="long")
+        # Build ensemble with graceful fallbacks
+        long_ok = (rule_dir == "long")
+        short_ok = (rule_dir == "short")
 
-        if not long_signal and not short_signal:
-            return None
+        if ml is not None:
+            long_ok = long_ok and (ml == 1)
+            short_ok = short_ok and (ml == 0)
 
-        price = self.ex.fetch_ticker(symbol)["last"]
-        qty = self.size(atr, price)
+        if lstm_prob is not None:
+            long_ok = long_ok and (lstm_prob > 0.5)
+            short_ok = short_ok and (lstm_prob < 0.5)
+
+        if rl_action is not None:
+            long_ok = long_ok and (rl_action != "short")
+            short_ok = short_ok and (rl_action != "long")
+
+        if not long_ok and not short_ok:
+            return
+
+        try:
+            ticker = self.ex.fetch_ticker(symbol)
+            price = ticker["last"]
+        except Exception as e:
+            log("fetch_ticker error", symbol, e)
+            return
+
+        qty = self.position_size(atr, price)
         if qty <= 0:
-            return None
+            return
 
-        side = "buy" if long_signal else "sell"
-        exit_side = "sell" if long_signal else "buy"
+        side = "buy" if long_ok else "sell"
+        exit_side = "sell" if long_ok else "buy"
 
-        sl = price - atr*2 if long_signal else price + atr*2
-        tp = price + atr*3 if long_signal else price - atr*3
+        sl = price - 2 * atr if long_ok else price + 2 * atr
+        tp = price + 3 * atr if long_ok else price - 3 * atr
 
-        # Execute
-        self.ex.create_order(symbol, "MARKET", side, qty)
-        self.ex.create_order(symbol, "STOP_MARKET", exit_side, qty, params={"stopPrice": float(sl)})
-        self.ex.create_order(symbol, "LIMIT", exit_side, qty, price=float(tp))
+        try:
+            # Entry
+            self.ex.create_order(symbol, "MARKET", side, qty)
 
-        log("TRADE:", symbol, side, qty, "SL", sl, "TP", tp)
-        log_trade(symbol, side, qty, price, sl, tp)
+            # Stop-loss
+            self.ex.create_order(
+                symbol,
+                "STOP_MARKET",
+                exit_side,
+                qty,
+                params={"stopPrice": float(sl)},
+            )
 
-        self.last_trade[symbol] = time.time()
-        self.trade_count[symbol] += 1
+            # Take-profit
+            self.ex.create_order(
+                symbol,
+                "LIMIT",
+                exit_side,
+                qty,
+                price=float(tp),
+            )
 
-        return side, price
+            log("TRADE", symbol, side, "qty", qty, "SL", sl, "TP", tp)
+            log_trade(symbol, side, qty, price, sl, tp)
 
-    # =====================================================
-    # One cycle (GitHub safe)
-    # =====================================================
+            self.last_trade[symbol] = time.time()
+            self.trade_count[symbol] += 1
+
+        except Exception as e:
+            log("order error", symbol, e)
+
+    # -------------------------
+    # One GitHub-safe cycle
+    # -------------------------
     def run_once(self):
-        for sym in self.symbols:
+        for s in self.symbols:
             try:
-                self.trade(sym)
+                self.trade_symbol(s)
             except Exception as e:
-                log("ERR", sym, e)
+                log("loop error", s, e)
 
 
 if __name__ == "__main__":
@@ -292,7 +364,7 @@ if __name__ == "__main__":
     sec = os.getenv("BINANCE_SECRET")
 
     if not api or not sec:
-        raise SystemExit("Missing keys")
+        raise SystemExit("Missing BINANCE_KEY or BINANCE_SECRET")
 
     bot = MegaBot(api, sec)
     bot.run_once()
