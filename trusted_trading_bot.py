@@ -28,12 +28,13 @@ class TrustedSignalBot:
     """
     High-filter futures bot:
       - Multi-timeframe (5m / 15m / 1h)
-      - Trades only when ALL conditions line up
+      - Trades only when strict conditions line up
       - ATR-based SL/TP
       - Cooldown + daily trade cap
     """
 
     def __init__(self, api_key: str, api_secret: str):
+        # Base exchange config
         self.exchange = ccxt.binance({
             "apiKey": api_key,
             "secret": api_secret,
@@ -41,9 +42,23 @@ class TrustedSignalBot:
             "options": {"defaultType": "future"},
         })
 
-        # IMPORTANT: use demo trading, not sandbox
-        # Requires recent ccxt version
-        self.exchange.enable_demo_trading()
+        # ---- DEMO TRADING FIX (handles different ccxt versions) ----
+        try:
+            if hasattr(self.exchange, "enable_demo_trading"):
+                try:
+                    # Newer ccxt versions expect a boolean
+                    self.exchange.enable_demo_trading(True)
+                    logger.info("Demo trading enabled with boolean flag.")
+                except TypeError:
+                    # Some builds don't expect args
+                    self.exchange.enable_demo_trading()
+                    logger.info("Demo trading enabled without boolean flag.")
+            else:
+                logger.warning(
+                    "exchange.enable_demo_trading not available on this ccxt version."
+                )
+        except Exception as e:
+            logger.warning(f"Failed to enable demo trading explicitly: {e}")
 
         # Symbols to trade
         self.symbols = ["ETHUSDT", "XRPUSDT", "1000PEPEUSDT"]
@@ -54,12 +69,12 @@ class TrustedSignalBot:
         self.tf_slow = "1h"
 
         # Risk / MM
-        self.risk_per_trade = 0.01       # 1% of equity
+        self.risk_per_trade = 0.01       # 1% of equity per trade
         self.atr_mult_sl = 2.0
         self.atr_mult_tp = 3.0
 
         # Overtrading protection
-        self.cooldown_sec = 15 * 60      # 15 minutes cooldown per symbol
+        self.cooldown_sec = 15 * 60      # 15 minutes per symbol
         self.max_trades_per_day = 5      # per symbol
 
         # Tracking
@@ -98,7 +113,9 @@ class TrustedSignalBot:
         df["macds"] = macd["MACDs_12_26_9"]
         df["macdh"] = macd["MACDh_12_26_9"]
 
-        df["adx"] = ta.adx(df["high"], df["low"], df["close"], 14)["ADX_14"]
+        adx_df = ta.adx(df["high"], df["low"], df["close"], 14)
+        df["adx"] = adx_df["ADX_14"]
+
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], 14)
         df["vol_sma"] = ta.sma(df["volume"], 20)
 
@@ -127,8 +144,8 @@ class TrustedSignalBot:
     # -----------------------------
     def _trusted_signal(self, symbol: str):
         """
-        Returns: 'long', 'short', or None.
-        Conditions are intentionally strict.
+        Returns: ('long'|'short'|None, atr, price)
+        Conditions are intentionally strict to avoid junk trades.
         """
         frames = self.get_mtf_frames(symbol)
         if frames[0] is None:
@@ -137,7 +154,6 @@ class TrustedSignalBot:
 
         df_fast, df_mid, df_slow = frames
 
-        # Last rows
         f = df_fast.iloc[-1]
         f_prev = df_fast.iloc[-2]
         m = df_mid.iloc[-1]
@@ -146,23 +162,29 @@ class TrustedSignalBot:
         price = f["close"]
 
         # Volatility + volume filters
-        if f["atr"] / price < 0.002:  # < 0.2% ATR → too dead
+        if f["atr"] <= 0 or price <= 0:
+            logger.info(f"{symbol}: invalid ATR/price, skipping")
+            return None, None, None
+
+        # Ignore dead markets: ATR less than 0.2% of price
+        if f["atr"] / price < 0.002:
             logger.info(f"{symbol}: volatility too low, skipping")
             return None, None, None
 
-        if f["volume"] < f["vol_sma"] * 1.2:  # need 20% above avg volume
+        # Require volume spike above average
+        if f["volume"] < f["vol_sma"] * 1.2:
             logger.info(f"{symbol}: volume weak, skipping")
             return None, None, None
 
-        # Higher timeframe trend
+        # Higher timeframe trend (1h)
         slow_uptrend = s["ema50"] > s["ema200"]
         slow_downtrend = s["ema50"] < s["ema200"]
 
-        # Mid timeframe structure
+        # Mid timeframe structure (15m)
         mid_bull = m["close"] > m["ema50"] and m["ema20"] > m["ema50"]
         mid_bear = m["close"] < m["ema50"] and m["ema20"] < m["ema50"]
 
-        # Fast timeframe momentum + candle pattern
+        # Fast timeframe momentum + RSI cross (5m)
         rsi_now = f["rsi"]
         rsi_prev = f_prev["rsi"]
         macd_now = f["macd"]
@@ -171,8 +193,8 @@ class TrustedSignalBot:
 
         # --- LONG SETUP ---
         long_conditions = [
-            slow_uptrend,                    # higher timeframe uptrend
-            mid_bull,                        # mid timeframe bullish
+            slow_uptrend,                    # HTF uptrend
+            mid_bull,                        # MTF structure up
             rsi_prev < 30 <= rsi_now,        # RSI crosses up from oversold
             macd_now > macds_now,            # MACD line above signal
             macdh_now > 0,                   # MACD histogram positive
@@ -203,16 +225,19 @@ class TrustedSignalBot:
     # -----------------------------
     def _position_size(self, symbol: str, price: float, atr: float) -> float:
         balance = self.exchange.fetch_balance()
-        equity = balance["total"]["USDT"]
-        risk_capital = equity * self.risk_per_trade
+        equity = balance["total"].get("USDT", 0)
+        if equity <= 0:
+            logger.warning(f"{symbol}: equity <= 0, cannot size position")
+            return 0.0
 
+        risk_capital = equity * self.risk_per_trade
         stop_distance = self.atr_mult_sl * atr
+
         if stop_distance <= 0:
             return 0.0
 
         qty = risk_capital / stop_distance
-        # Round to 3 decimals, safe enough for USDT-margined futures
-        return round(max(qty, 0), 3)
+        return round(max(qty, 0), 3)  # simple rounding for futures
 
     # -----------------------------
     # Order execution
@@ -264,22 +289,28 @@ class TrustedSignalBot:
             logger.info(f"{symbol}: entry order: {order}")
 
             # Stop-loss (STOP_MARKET)
-            self.exchange.create_order(
-                symbol=symbol,
-                type="STOP_MARKET",
-                side=sl_side,
-                amount=qty,
-                params={"stopPrice": float(f"{sl:.4f}")},
-            )
+            try:
+                self.exchange.create_order(
+                    symbol=symbol,
+                    type="STOP_MARKET",
+                    side=sl_side,
+                    amount=qty,
+                    params={"stopPrice": float(f"{sl:.4f}")},
+                )
+            except Exception as e:
+                logger.warning(f"{symbol}: failed to place SL order: {e}")
 
             # Take-profit (LIMIT)
-            self.exchange.create_order(
-                symbol=symbol,
-                type="LIMIT",
-                side=sl_side,
-                amount=qty,
-                price=float(f"{tp:.4f}"),
-            )
+            try:
+                self.exchange.create_order(
+                    symbol=symbol,
+                    type="LIMIT",
+                    side=sl_side,
+                    amount=qty,
+                    price=float(f"{tp:.4f}"),
+                )
+            except Exception as e:
+                logger.warning(f"{symbol}: failed to place TP order: {e}")
 
             logger.info(
                 f"{symbol}: SL={sl:.4f}, TP={tp:.4f}, qty={qty}"
@@ -307,7 +338,6 @@ class TrustedSignalBot:
                     logger.error(f"Error in loop for {symbol}: {e}")
                     continue
 
-            # Check every 5 minutes (aligned with 5m TF)
             logger.info("Cycle completed, sleeping 300s...")
             time.sleep(300)
 
@@ -317,7 +347,7 @@ if __name__ == "__main__":
     api_secret = os.environ.get("BINANCE_SECRET", "")
 
     if not api_key or not api_secret:
-        raise SystemExit("Set BINANCE_KEY and BINANCE_SECRET env vars.")
+        raise SystemExit("Set BINANCE_KEY and BINANCE_SECRET env vars before running.")
 
     bot = TrustedSignalBot(api_key, api_secret)
     bot.run()
