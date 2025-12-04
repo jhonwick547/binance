@@ -3,47 +3,51 @@ import plotly.graph_objects as go
 import os
 
 def generate_dashboard():
-    if not os.path.exists("trades.csv"):
-        print("No trades.csv yet – dashboard skipped.")
-        return
+    has_trades = os.path.exists("trades.csv") and os.path.getsize("trades.csv") > 0
 
-    df = pd.read_csv("trades.csv")
+    if has_trades:
+        df = pd.read_csv("trades.csv")
+        if df.empty:
+            has_trades = False
 
-    if df.empty:
-        print("trades.csv empty – dashboard skipped.")
-        return
+    if has_trades:
+        # Basic PnL approximation based on SL/TP vs entry
+        df["pnl"] = 0.0
+        df.loc[df["side"] == "buy",  "pnl"] = df["tp"] - df["entry"]
+        df.loc[df["side"] == "sell", "pnl"] = df["entry"] - df["tp"]
 
-    # Basic PnL approximation based on SL/TP vs entry
-    df["pnl"] = 0.0
-    df.loc[df["side"] == "buy",  "pnl"] = df["tp"] - df["entry"]
-    df.loc[df["side"] == "sell", "pnl"] = df["entry"] - df["tp"]
+        df["equity"] = df["pnl"].cumsum()
 
-    df["equity"] = df["pnl"].cumsum()
+        total_pnl = df["pnl"].sum()
+        wins = (df["pnl"] > 0).sum()
+        losses = (df["pnl"] <= 0).sum()
+        total_trades = len(df)
+        winrate = round(wins / total_trades * 100, 2) if total_trades > 0 else 0.0
 
-    total_pnl = df["pnl"].sum()
-    wins = (df["pnl"] > 0).sum()
-    losses = (df["pnl"] <= 0).sum()
-    total_trades = len(df)
-    winrate = round(wins / total_trades * 100, 2) if total_trades > 0 else 0.0
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df["ts"],
+            y=df["equity"],
+            mode="lines",
+            name="Equity"
+        ))
+        fig.update_layout(
+            title="Equity Curve",
+            xaxis_title="Time",
+            yaxis_title="PnL (USDT)",
+            template="plotly_dark",
+            height=400
+        )
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df["ts"],
-        y=df["equity"],
-        mode="lines",
-        name="Equity"
-    ))
-    fig.update_layout(
-        title="Equity Curve",
-        xaxis_title="Time",
-        yaxis_title="PnL (USDT)",
-        template="plotly_dark",
-        height=400
-    )
-
-    equity_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
-
-    recent_html = df.tail(20).to_html(index=False)
+        equity_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+        recent_html = df.tail(20).to_html(index=False)
+    else:
+        # No trades yet -> placeholder content
+        total_pnl = 0.0
+        wins = losses = total_trades = 0
+        winrate = 0.0
+        equity_html = "<p>No trades yet. Come back after the bot runs and logs some trades.</p>"
+        recent_html = "<p>No trades to display.</p>"
 
     html = f"""
 <!DOCTYPE html>
