@@ -1,0 +1,23 @@
+name: Trusted Futures Bot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"    # every 5 minutes
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        pip install ccxt pandas pandas_ta
+
+    - name: Run trusted bot
+      env:
+        BINANCE_KEY: ${{ secrets.BINANCE_KEY }}
+        BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
+      run: python trusted_trading_bot.py
