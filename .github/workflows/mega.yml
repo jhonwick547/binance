@@ -17,10 +17,10 @@ jobs:
       with:
         python-version: "3.11"
 
-    - name: Install deps
+    - name: Install dependencies
       run: |
         pip install --upgrade pip
-        pip install ccxt pandas ta torch numpy joblib
+        pip install ccxt pandas ta torch numpy joblib plotly
 
     - name: Run Mega Bot
       env:
@@ -28,8 +28,13 @@ jobs:
         BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
       run: python3 mega_bot.py
 
-    - name: Commit trade logs
+    - name: Generate Dashboard
+      run: python3 dashboard_generator.py
+
+    - name: Commit CSV + Dashboard
       uses: stefanzweifel/git-auto-commit-action@v4
       with:
-        commit_message: "Update trades.csv"
-        file_pattern: "trades.csv"
+        commit_message: "Update trades.csv & dashboard"
+        file_pattern: |
+          trades.csv
+          dashboard.html
