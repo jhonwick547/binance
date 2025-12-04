@@ -11,30 +11,31 @@ jobs:
     timeout-minutes: 10
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    - name: Install dependencies
-      run: |
-        pip install --upgrade pip
-        pip install ccxt pandas ta torch numpy joblib plotly
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ccxt pandas ta torch numpy joblib plotly
 
-    - name: Run Mega Bot
-      env:
-        BINANCE_KEY: ${{ secrets.BINANCE_KEY }}
-        BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
-      run: python3 mega_bot.py
+      - name: Run Mega Bot
+        env:
+          BINANCE_KEY: ${{ secrets.BINANCE_KEY }}
+          BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
+        run: python3 mega_bot.py
 
-    - name: Generate Dashboard
-      run: python3 dashboard_generator.py
+      - name: Generate Dashboard
+        run: python3 dashboard_generator.py
 
-    - name: Commit CSV + Dashboard
-      uses: stefanzweifel/git-auto-commit-action@v4
-      with:
-        commit_message: "Update trades.csv & dashboard"
-        file_pattern: |
-          trades.csv
-          dashboard.html
+      - name: Commit CSV + Dashboard + Index
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: "Update trades & dashboard"
+          file_pattern: |
+            trades.csv
+            dashboard.html
+            index.html
