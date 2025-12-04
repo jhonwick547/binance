@@ -2,15 +2,13 @@ name: Trusted Futures Bot
 
 on:
   schedule:
-    # Run every 5 minutes
     - cron: "*/5 * * * *"
-  # Allow manual trigger from the Actions tab
   workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repo
@@ -24,37 +22,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade ccxt
-          pip install pandas pandas_ta
+          pip install --upgrade ccxt pandas ta
 
-      - name: Run one trading cycle
+      - name: Run one trusted trading cycle
         env:
           BINANCE_KEY: ${{ secrets.BINANCE_KEY }}
           BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
         run: |
-          python - << 'EOF'
-          import os
-          import logging
-          from trusted_trading_bot import TrustedSignalBot
-
-          logging.basicConfig(level=logging.INFO)
-
-          api_key = os.environ.get("BINANCE_KEY")
-          api_secret = os.environ.get("BINANCE_SECRET")
-
-          if not api_key or not api_secret:
-              raise SystemExit("BINANCE_KEY / BINANCE_SECRET not set")
-
-          bot = TrustedSignalBot(api_key, api_secret)
-
-          # Run exactly ONE cycle manually instead of bot.run() infinite loop
-          for symbol in bot.symbols:
-              try:
-                  direction, atr, price = bot._trusted_signal(symbol)
-                  if direction and atr and price:
-                      bot._execute_trade(symbol, direction, price, atr)
-                  else:
-                      print(f"{symbol}: no trade this cycle")
-              except Exception as e:
-                  print(f"Error for {symbol}: {e}")
-          EOF
+          python3 trusted_trading_bot.py --once
